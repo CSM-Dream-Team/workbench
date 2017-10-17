@@ -9,6 +9,7 @@ extern crate nalgebra;
 extern crate glutin;
 extern crate gfx_device_gl;
 extern crate gfx_window_glutin;
+extern crate ncollide;
 
 use simplelog::{Config, TermLogger, LogLevelFilter};
 use clap::{Arg, App};
@@ -19,7 +20,8 @@ use gfx::memory::Typed;
 use glutin::GlContext;
 
 mod app;
-mod state;
+//mod grid;
+//mod state;
 mod animation;
 
 use lib::draw;
