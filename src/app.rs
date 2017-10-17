@@ -1,21 +1,23 @@
-use std::path::Path;
 use std::time::Instant;
 use gfx::{self, Factory};
 use gfx::traits::FactoryExt;
-use nalgebra::{self as na, Point3, Point2, Translation3, IsometryMatrix3};
+use nalgebra::{self as na, Point3, Point2, Vector3, Isometry3};
+use ncollide::shape::Cuboid;
+use ncollide::query::{Ray, RayCast};
 
 use lib::{Texture, Light, PbrMesh, Error};
 use lib::mesh::*;
 use lib::load;
-use lib::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial, UnishadeStyle};
-use lib::vr::{primary, secondary, ControllerRef, VrMoment, ViveController};
+use lib::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial};
+use lib::vr::{primary, secondary, VrMoment, ViveController, Trackable};
 
 pub const NEAR_PLANE: f64 = 0.1;
 pub const FAR_PLANE: f64 = 1000.;
 pub const BACKGROUND: [f32; 4] = [0.529, 0.808, 0.980, 1.0];
 const PI: f32 = ::std::f32::consts::PI;
 const PI2: f32 = 2. * PI;
-const DEG: f32 = PI2 / 360.;
+
+const CUBE_SIZE: f32 = 0.125;
 
 pub struct AppMats<R: gfx::Resources> {
     plastic: PbrMaterial<R>,
@@ -40,11 +42,10 @@ pub struct App<R: gfx::Resources> {
     pbr: Painter<R, PbrStyle<R>>,
     controller: PbrMesh<R>,
     cube: PbrMesh<R>,
-    grab: (IsometryMatrix3<f32>, Option<ControllerRef>),
+    grab: (Isometry3<f32>, Option<Isometry3<f32>>),
     start_time: Instant,
     primary: ViveController,
     secondary: ViveController,
-    mat: AppMats<R>,
 }
 
 fn cube(rad: f32) -> MeshSource<VertN, ()> {
@@ -93,15 +94,12 @@ impl<R: gfx::Resources> App<R> {
                 .compute_tan()
                 .with_material(mat.plastic.clone())
                 .upload(factory),
-            cube: cube(0.125)
+            cube: cube(CUBE_SIZE)
                 .with_tex(Point2::new(0., 0.))
-                .compute_tan()
+                .compute_tan() 
                 .with_material(mat.plastic.clone())
                 .upload(factory),
-            grab: (IsometryMatrix3::from_parts(
-                Translation3::new(0., 1., 0.),
-                na::one(),
-            ), None),
+            grab: (na::one(), None),
             start_time: Instant::now(),
             primary: ViveController {
                 is: primary(),
@@ -112,7 +110,6 @@ impl<R: gfx::Resources> App<R> {
                 is: secondary(),
                 .. Default::default()
             },
-            mat: mat,
         })
     }
 
@@ -156,7 +153,21 @@ impl<R: gfx::Resources> App<R> {
             ]);
         });
 
-        self.pbr.draw(ctx, na::convert(vrm.stage * self.grab.0), &self.cube);
+        if let Some(off) = self.grab.1 {
+            if self.primary.trigger > 0.5 {
+                self.grab.0 = self.primary.pose() * off;
+            } else {
+                self.grab.1 = None;
+            }
+        } else {
+            let shape = Cuboid::new(Vector3::from_element(CUBE_SIZE));
+            let prim = Ray::new(self.primary.origin(), self.primary.pointing());
+            if self.primary.trigger > 0.5 && shape.intersects_ray(&self.grab.0, &prim) {
+                self.grab.1 = Some(self.primary.pose().inverse() * self.grab.0);
+            }
+        }
+        
+        self.pbr.draw(ctx, na::convert(self.grab.0), &self.cube);
 
         // Draw controllers
         for cont in vrm.controllers() {
