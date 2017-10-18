@@ -1,7 +1,7 @@
 use std::time::Instant;
 use gfx::{self, Factory};
 use gfx::traits::FactoryExt;
-use nalgebra::{self as na, Point3, Point2, Vector3, Similarity3, Isometry3, Translation3};
+use nalgebra::{self as na, Point3, Point2, Vector3, Similarity3, Isometry3, Translation3, UnitQuaternion};
 use ncollide::shape::Cuboid3;
 use ncollide::query::{Ray, PointQuery, RayCast};
 
@@ -12,7 +12,7 @@ use lib::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial};
 use lib::vr::{primary, secondary, VrMoment, ViveController, Trackable};
 
 pub const NEAR_PLANE: f64 = 0.1;
-pub const FAR_PLANE: f64 = 1000.;
+pub const FAR_PLANE: f64 = 75.;
 pub const BACKGROUND: [f32; 4] = [0.529, 0.808, 0.980, 1.0];
 const PI: f32 = ::std::f32::consts::PI;
 const PI2: f32 = 2. * PI;
@@ -111,8 +111,8 @@ impl<R: gfx::Resources> App<R> {
                 .upload(factory),
             line: MeshSource {
                     verts: vec![
-                        VertC { pos: [0., 0., 0.], color: [0.4, 0.4, 0.8] },
-                        VertC { pos: [0., 0., -1.], color: [0.1, 0.1, 0.9] },
+                        VertC { pos: [0., 0., 0.], color: [0.22, 0.74, 0.94] },
+                        VertC { pos: [0., 0., -1.], color: [0.2, 0.28, 0.31] },
                     ],
                     inds: Indexing::All,
                     prim: Primitive::LineList,
@@ -124,10 +124,17 @@ impl<R: gfx::Resources> App<R> {
                 .compute_tan()
                 .with_material(mat.dark_plastic)
                 .upload(factory),
-            objects: (0i32..10).map(|i| Grabable {
-                pos: na::convert(Translation3::new(i as f32 * 0.3, 0., 0.)),
-                shape: Cuboid3::new(Vector3::from_element(0.125)),
-                radius: 0.125,
+            objects: (0i32..10).map(|i| {
+                let rad = 0.2 * (1. - i as f32 / 15.);
+                let theta = (i as f32) / 5. * PI;
+                Grabable {
+                    pos: Isometry3::from_parts(
+                        Translation3::new(theta.sin() * 1., 0., theta.cos() * 1.),
+                        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta)
+                    ),
+                    shape: Cuboid3::new(Vector3::from_element(rad)),
+                    radius: rad,
+                }
             }).collect(),
             grab: None,
             last_time: Instant::now(),
@@ -212,7 +219,7 @@ impl<R: gfx::Resources> App<R> {
         }
 
         self.solid.draw(ctx, na::convert(
-            Similarity3::from_isometry(self.primary.pose(), self.line_len.min(10.).max(0.01))
+            Similarity3::from_isometry(self.primary.pose(), self.line_len.max(0.01).min(FAR_PLANE as f32))
         ), &self.line)
     }
 }
