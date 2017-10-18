@@ -194,6 +194,10 @@ impl<R: gfx::Resources> App<R> {
             o.shape.toi_with_ray(&o.pos, &ray, true).map(|t| (i, t))
         }).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
             self.line_len = t;
+            let pull = 3f32.powf(self.primary.pad_delta[1] as f32);
+            let pull = t * pull - t;
+            self.objects[i].pos.translation.vector += pull * ray.dir;
+
             if self.primary.trigger > 0.5 && self.grab.is_none() {
                 self.grab = Some((i, self.primary.pose().inverse() * self.objects[i].pos));
             }
