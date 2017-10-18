@@ -1,9 +1,8 @@
 use std::time::Instant;
-use std::cell::RefCell;
 use gfx::{self, Factory};
 use gfx::traits::FactoryExt;
 use nalgebra::{self as na, Point3, Point2, Vector3, Similarity3, Isometry3, Translation3};
-use ncollide::shape::Cuboid;
+use ncollide::shape::Cuboid3;
 use ncollide::query::{Ray, PointQuery, RayCast};
 
 use lib::{Texture, Light, PbrMesh, Error};
@@ -54,10 +53,11 @@ pub struct App<R: gfx::Resources> {
     solid: Painter<R, SolidStyle<R>>,
     pbr: Painter<R, PbrStyle<R>>,
     controller: PbrMesh<R>,
+    line: Mesh<R, VertC, ()>,
+    line_len: f32,
     cube: PbrMesh<R>,
-    dark_cube: PbrMesh<R>,
-    blue_cube: PbrMesh<R>,
-    objects: Vec<RefCell<Object>>,
+    objects: Vec<Grabable>,
+    grab: Option<(usize, Isometry3<f32>)>,
     last_time: Instant,
     primary: ViveController,
     secondary: ViveController,
@@ -100,11 +100,6 @@ impl<R: gfx::Resources> App<R> {
         pbr.setup(factory, Primitive::TriangleList)?;
 
         let mat = AppMats::new(factory)?;
-        let mut cube = cube(1.)
-            .with_tex(Point2::new(0., 0.))
-            .compute_tan() 
-            .with_material(mat.plastic.clone())
-            .upload(factory);
 
         // Construct App
         Ok(App {
@@ -114,24 +109,30 @@ impl<R: gfx::Resources> App<R> {
                 .compute_tan()
                 .with_material(mat.plastic.clone())
                 .upload(factory),
-            cube: cube.clone(),
-            dark_cube: {
-                cube.mat = mat.dark_plastic;
-                cube.clone()
-            },
-            blue_cube: {
-                cube.mat = mat.blue_plastic;
-                cube
-            },
-            objects: (0i32..10).map(|i| Object {
-                pos: na::convert(Translation3::new(i as f32 * 0.5, 0., 0.)),
+            line: MeshSource {
+                    verts: vec![
+                        VertC { pos: [0., 0., 0.], color: [0.4, 0.4, 0.8] },
+                        VertC { pos: [0., 0., -1.], color: [0.1, 0.1, 0.9] },
+                    ],
+                    inds: Indexing::All,
+                    prim: Primitive::LineList,
+                    mat: (),
+                }.upload(factory),
+            line_len: ::std::f32::INFINITY,
+            cube: cube(1.)
+                .with_tex(Point2::new(0., 0.))
+                .compute_tan()
+                .with_material(mat.dark_plastic)
+                .upload(factory),
+            objects: (0i32..10).map(|i| Grabable {
+                pos: na::convert(Translation3::new(i as f32 * 0.3, 0., 0.)),
+                shape: Cuboid3::new(Vector3::from_element(0.125)),
                 radius: 0.125,
-                grab: None,
-            }).map(|o| RefCell::new(o)).collect(),
+            }).collect(),
+            grab: None,
             last_time: Instant::now(),
             primary: ViveController {
                 is: primary(),
-                pad: Point2::new(1., 0.),
                 .. Default::default()
             },
             secondary: ViveController {
@@ -181,53 +182,51 @@ impl<R: gfx::Resources> App<R> {
             ]);
         });
 
+        let ray = Ray::new(self.primary.origin(), self.primary.pointing());
+        if let Some((i, t)) = self.objects.iter().enumerate().filter_map(|(i, o)| {
+            o.shape.toi_with_ray(&o.pos, &ray, true).map(|t| (i, t))
+        }).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+            self.line_len = t;
+            if self.primary.trigger > 0.5 && self.grab.is_none() {
+                self.grab = Some((i, self.primary.pose().inverse() * self.objects[i].pos));
+            }
+        } else {
+            self.line_len = ::std::f32::INFINITY;
+        }
+
+        if let Some((ind, off)) = self.grab {
+            if self.primary.trigger > 0.5 {
+                self.objects[ind].pos = self.primary.pose() * off;
+            } else {
+                self.grab = None
+            }
+        }
+
         for o in &self.objects {
-            let mut o = o.borrow_mut();
-            o.update(dt, self, vrm);
-            o.draw(self, ctx);
+            self.pbr.draw(ctx, na::convert(Similarity3::from_isometry(o.pos, o.radius)), &self.cube)
         }
 
         // Draw controllers
         for cont in vrm.controllers() {
             self.pbr.draw(ctx, na::convert(cont.pose), &self.controller);
         }
+
+        self.solid.draw(ctx, na::convert(
+            Similarity3::from_isometry(self.primary.pose(), self.line_len.min(10.).max(0.01))
+        ), &self.line)
     }
 }
 
-pub struct Object {
+pub trait InteractShape: 
+    PointQuery<Point3<f32>, Isometry3<f32>> + 
+    RayCast<Point3<f32>, Isometry3<f32>> {}
+impl<T: PointQuery<
+    Point3<f32>, Isometry3<f32>> +
+    RayCast<Point3<f32>, Isometry3<f32>>> 
+    InteractShape for T {}
+
+pub struct Grabable {
     pos: Isometry3<f32>,
+    shape: Cuboid3<f32>,
     radius: f32,
-    grab: Option<Isometry3<f32>>,
-}
-
-impl Object {
-    fn draw<R: gfx::Resources, C: gfx::CommandBuffer<R>>(
-        &self,
-        app: &App<R>,
-        ctx: &mut DrawParams<R, C>)
-    {
-        let mat = na::convert(Similarity3::from_isometry(self.pos, self.radius));
-        if self.grab.is_some() {
-            app.pbr.draw(ctx, mat, &app.blue_cube);
-        } else {
-            app.pbr.draw(ctx, mat, &app.dark_cube);
-        }
-        
-    }
-
-    fn update<R: gfx::Resources>(&mut self, dt: f32, app: &App<R>, vrm: &VrMoment) {
-        if let Some(off) = self.grab {
-            if app.primary.trigger > 0.5 {
-                self.pos = app.primary.pose() * off;
-            } else {
-                self.grab = None;
-            }
-        } else {
-            let shape = Cuboid::new(Vector3::from_element(self.radius));
-            let prim = Ray::new(app.primary.origin(), app.primary.pointing());
-            if app.primary.trigger > 0.5 && shape.intersects_ray(&self.pos, &prim) {
-                self.grab = Some(app.primary.pose().inverse() * self.pos);
-            }
-        }
-    }
 }
