@@ -1,15 +1,15 @@
-use std::time::Instant;
 use gfx::{self, Factory};
 use gfx::traits::FactoryExt;
 use nalgebra::{self as na, Point3, Point2, Vector3, Similarity3, Isometry3, Translation3, UnitQuaternion};
 use ncollide::shape::Cuboid3;
-use ncollide::query::{Ray, PointQuery, RayCast};
 
-use lib::{Texture, Light, PbrMesh, Error};
-use lib::mesh::*;
-use lib::load;
-use lib::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial};
-use lib::vr::{primary, secondary, VrMoment, ViveController, Trackable};
+use flight::{Texture, Light, PbrMesh, Error};
+use flight::mesh::*;
+use flight::load;
+use flight::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial};
+use flight::vr::{primary, secondary, VrMoment, ViveController, Trackable};
+
+use interact::{VrGuru, PointingReply};
 
 pub const NEAR_PLANE: f64 = 0.1;
 pub const FAR_PLANE: f64 = 75.;
@@ -49,18 +49,73 @@ impl<R: gfx::Resources> AppMats<R> {
     }
 }
 
+pub struct Model {
+    cubes: Vec<CubeModel>,
+}
+
+pub struct CubeModel {
+    grabbed: Option<Isometry3<f32>>,
+    pos: Isometry3<f32>,
+    radius: f32,
+}
+
+struct CubePartial {
+    index: usize,
+    reply: PointingReply,
+}
+
+impl CubePartial {
+    fn finish<R: gfx::Resources, C: gfx::CommandBuffer<R>>(
+        self,
+        ctx: &mut DrawParams<R, C>,
+        app: &mut App<R>,
+    ) {
+        let model = &mut app.model.cubes[self.index];
+        if let Some(_) = self.reply.expect("pointing not applied") {
+            // Grab
+            if app.primary.trigger > 0.5 {
+                model.grabbed = Some(app.primary.pose().inverse() * model.pos);
+            }
+            // TODO: speed not delta
+            // Yank
+            if app.primary.pad_delta[0] < 0. {
+                model.grabbed = Some(Isometry3::from_parts(
+                    Translation3::from_vector((model.radius + 0.05) * Vector3::z()),
+                    app.primary.pose().rotation.inverse() * model.pos.rotation,
+                ));
+            }
+        }
+        // Update position
+        if let Some(off) = model.grabbed {
+            model.pos = app.primary.pose() * off;
+            app.pbr.draw(
+                ctx,
+                na::convert(Similarity3::from_isometry(model.pos, model.radius)),
+                &Mesh {
+                    mat: app.mats.blue_plastic.clone(),
+                    .. app.cube.clone()
+                },
+            );
+        } else {
+            app.pbr.draw(
+                ctx,
+                na::convert(Similarity3::from_isometry(model.pos, model.radius)),
+                &app.cube
+            );
+        }
+    }
+}
+
 pub struct App<R: gfx::Resources> {
     solid: Painter<R, SolidStyle<R>>,
     pbr: Painter<R, PbrStyle<R>>,
     controller: PbrMesh<R>,
     line: Mesh<R, VertC, ()>,
-    line_len: f32,
     cube: PbrMesh<R>,
-    objects: Vec<Grabable>,
-    grab: Option<(usize, Isometry3<f32>)>,
-    last_time: Instant,
+    mats: AppMats<R>,
     primary: ViveController,
     secondary: ViveController,
+    model: Model,
 }
 
 fn cube(rad: f32) -> MeshSource<VertN, ()> {
@@ -118,26 +173,12 @@ impl<R: gfx::Resources> App<R> {
                     prim: Primitive::LineList,
                     mat: (),
                 }.upload(factory),
-            line_len: ::std::f32::INFINITY,
             cube: cube(1.)
                 .with_tex(Point2::new(0., 0.))
                 .compute_tan()
-                .with_material(mat.dark_plastic)
+                .with_material(mat.dark_plastic.clone())
                 .upload(factory),
-            objects: (0i32..10).map(|i| {
-                let rad = 0.2 * (1. - i as f32 / 15.);
-                let theta = (i as f32) / 5. * PI;
-                Grabable {
-                    pos: Isometry3::from_parts(
-                        Translation3::new(theta.sin() * 1., 0., theta.cos() * 1.),
-                        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta)
-                    ),
-                    shape: Cuboid3::new(Vector3::from_element(rad)),
-                    radius: rad,
-                }
-            }).collect(),
-            grab: None,
-            last_time: Instant::now(),
+            mats: mat,
             primary: ViveController {
                 is: primary(),
                 .. Default::default()
@@ -145,6 +186,20 @@ impl<R: gfx::Resources> App<R> {
             secondary: ViveController {
                 is: secondary(),
                 .. Default::default()
+            },
+            model: Model {
+                cubes: (0i32..10).map(|i| {
+                    let rad = 0.2 * (1. - i as f32 / 15.);
+                    let theta = (i as f32) / 5. * PI;
+                    CubeModel {
+                        grabbed: None,
+                        pos: Isometry3::from_parts(
+                            Translation3::new(theta.sin() * 1., 0., theta.cos() * 1.),
+                            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta)
+                        ),
+                        radius: rad,
+                    }
+                }).collect(),
             },
         })
     }
@@ -154,9 +209,6 @@ impl<R: gfx::Resources> App<R> {
         ctx: &mut DrawParams<R, C>,
         vrm: &VrMoment,
     ) {
-        let dt = self.last_time.elapsed();
-        let dt = dt.as_secs() as f32 + (dt.subsec_nanos() as f32 * 1e-9);
-
         match (self.primary.update(vrm), self.secondary.update(vrm)) {
             (Ok(_), Ok(_)) => (),
             _ => warn!("A not vive-like controller is connected"),
@@ -189,32 +241,31 @@ impl<R: gfx::Resources> App<R> {
             ]);
         });
 
-        let ray = Ray::new(self.primary.origin(), self.primary.pointing());
-        if let Some((i, t)) = self.objects.iter().enumerate().filter_map(|(i, o)| {
-            o.shape.toi_with_ray(&o.pos, &ray, true).map(|t| (i, t))
-        }).min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
-            self.line_len = t;
-            let pull = 3f32.powf(self.primary.pad_delta[1] as f32);
-            let pull = t * pull - t;
-            self.objects[i].pos.translation.vector += pull * ray.dir;
-
-            if self.primary.trigger > 0.5 && self.grab.is_none() {
-                self.grab = Some((i, self.primary.pose().inverse() * self.objects[i].pos));
-            }
-        } else {
-            self.line_len = ::std::f32::INFINITY;
-        }
-
-        if let Some((ind, off)) = self.grab {
-            if self.primary.trigger > 0.5 {
-                self.objects[ind].pos = self.primary.pose() * off;
-            } else {
-                self.grab = None
-            }
-        }
-
-        for o in &self.objects {
-            self.pbr.draw(ctx, na::convert(Similarity3::from_isometry(o.pos, o.radius)), &self.cube)
+        let mut guru = VrGuru::new(&self.primary, &self.secondary); 
+        let cube_partials: Vec<_> = self.model.cubes
+            .iter_mut()
+            .enumerate()
+            .map(|(i, c)| {
+                if c.grabbed.is_some() && guru.primary.data.trigger > 0.5 {
+                    guru.primary.block_pointing();
+                } else {
+                    c.grabbed = None;
+                }
+                let cuboid = Cuboid3::new(Vector3::from_element(c.radius));
+                guru.primary.laser(&c.pos, &cuboid);
+                CubePartial {
+                    index: i,
+                    reply: guru.primary.pointing(
+                        &c.pos,
+                        &cuboid,
+                        true),
+                }
+            })
+            .collect();
+        let toi = guru.primary.laser_toi.unwrap_or(FAR_PLANE as f32).max(0.01);
+        guru.apply();
+        for p in cube_partials {
+            p.finish(ctx, self);
         }
 
         // Draw controllers
@@ -223,21 +274,7 @@ impl<R: gfx::Resources> App<R> {
         }
 
         self.solid.draw(ctx, na::convert(
-            Similarity3::from_isometry(self.primary.pose(), self.line_len.max(0.01).min(FAR_PLANE as f32))
+            Similarity3::from_isometry(self.primary.pose(), toi)
         ), &self.line)
     }
-}
-
-pub trait InteractShape: 
-    PointQuery<Point3<f32>, Isometry3<f32>> + 
-    RayCast<Point3<f32>, Isometry3<f32>> {}
-impl<T: PointQuery<
-    Point3<f32>, Isometry3<f32>> +
-    RayCast<Point3<f32>, Isometry3<f32>>> 
-    InteractShape for T {}
-
-pub struct Grabable {
-    pos: Isometry3<f32>,
-    shape: Cuboid3<f32>,
-    radius: f32,
 }

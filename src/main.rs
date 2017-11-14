@@ -3,7 +3,7 @@
 extern crate log;
 extern crate clap;
 extern crate simplelog;
-extern crate flight as lib;
+extern crate flight;
 extern crate gfx;
 extern crate nalgebra;
 extern crate glutin;
@@ -23,9 +23,10 @@ mod app;
 //mod grid;
 //mod state;
 mod animation;
+mod interact;
 
-use lib::draw;
-use lib::vr::*;
+use flight::draw;
+use flight::vr::*;
 
 fn main() {
     // Logging setup

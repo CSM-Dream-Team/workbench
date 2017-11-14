@@ -6,7 +6,7 @@ authors = [
 ]
 
 [dependencies]
-flight = { git="https://github.com/CSM-Dream-Team/flight" }
+flight = { git="https://github.com/flight-rs/flight" }
 clap = "*"
 simplelog = "*"
 glutin = "*"
