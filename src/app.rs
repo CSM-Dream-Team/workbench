@@ -1,7 +1,7 @@
 use gfx::{self, Factory};
 use gfx::traits::FactoryExt;
 use nalgebra::{self as na, Point3, Point2, Vector3, Similarity3, Isometry3, Translation3, UnitQuaternion};
-use ncollide::shape::Cuboid3;
+use ncollide::shape::{Cuboid3, Plane};
 
 use flight::{Texture, Light, PbrMesh, Error};
 use flight::mesh::*;
@@ -19,6 +19,7 @@ const PI2: f32 = 2. * PI;
 
 pub struct AppMats<R: gfx::Resources> {
     plastic: PbrMaterial<R>,
+    floor: PbrMaterial<R>,
     dark_plastic: PbrMaterial<R>,
     blue_plastic: PbrMaterial<R>,
 }
@@ -32,6 +33,12 @@ impl<R: gfx::Resources> AppMats<R> {
                 albedo: Texture::<_, (R8_G8_B8_A8, Srgb)>::uniform_value(f, [0x60, 0x60, 0x60, 0xFF])?,
                 metalness: Texture::<_, (R8, Unorm)>::uniform_value(f, 0x00)?,
                 roughness: Texture::<_, (R8, Unorm)>::uniform_value(f, 0x20)?,
+            },
+            floor: PbrMaterial {
+                normal: Texture::<_, (R8_G8_B8_A8, Unorm)>::uniform_value(f, [0x80, 0x80, 0xFF, 0xFF])?,
+                albedo: Texture::<_, (R8_G8_B8_A8, Srgb)>::uniform_value(f, [0xA0, 0xA0, 0xA0, 0xFF])?,
+                metalness: Texture::<_, (R8, Unorm)>::uniform_value(f, 0xFF)?,
+                roughness: Texture::<_, (R8, Unorm)>::uniform_value(f, 0x40)?,
             },
             dark_plastic: PbrMaterial {
                 normal: Texture::<_, (R8_G8_B8_A8, Unorm)>::uniform_value(f, [0x80, 0x80, 0xFF, 0xFF])?,
@@ -72,17 +79,27 @@ impl CubePartial {
     ) {
         let model = &mut app.model.cubes[self.index];
         if let Some(_) = self.reply.expect("pointing not applied") {
-            // Grab
-            if app.primary.trigger > 0.5 {
-                model.grabbed = Some(app.primary.pose().inverse() * model.pos);
-            }
             // TODO: speed not delta
             // Yank
-            if app.primary.pad_delta[0] < 0. {
-                model.grabbed = Some(Isometry3::from_parts(
-                    Translation3::from_vector((model.radius + 0.05) * Vector3::z()),
-                    app.primary.pose().rotation.inverse() * model.pos.rotation,
-                ));
+            if app.primary.pad_delta[1] < 0. {
+                model.pos = Isometry3::from_parts(
+                    Translation3::from_vector((app.primary.pose() * Point3::new(0., 0., -0.1 - model.radius)).coords),
+                    model.pos.rotation,
+                );
+            }
+
+            // TODO: speed not delta
+            // Push
+            if app.primary.pad_delta[1] > 0. {
+                model.pos = Isometry3::from_parts(
+                    Translation3::from_vector((app.primary.pose() * Point3::new(0., 0., -2.5)).coords),
+                    model.pos.rotation,
+                );
+            }
+
+            // Grab
+            if app.primary.trigger > 0.5 && app.primary.trigger - app.primary.trigger_delta < 0.5 {
+                model.grabbed = Some(app.primary.pose().inverse() * model.pos);
             }
         }
         // Update position
@@ -111,6 +128,7 @@ pub struct App<R: gfx::Resources> {
     pbr: Painter<R, PbrStyle<R>>,
     controller: PbrMesh<R>,
     line: Mesh<R, VertC, ()>,
+    floor: PbrMesh<R>,
     cube: PbrMesh<R>,
     mats: AppMats<R>,
     primary: ViveController,
@@ -118,27 +136,65 @@ pub struct App<R: gfx::Resources> {
     model: Model,
 }
 
-fn cube(rad: f32) -> MeshSource<VertN, ()> {
-    fn square<V, F: Fn(f32, f32) -> V>(rad: f32, f: F, vec: &mut Vec<V>) {
-        vec.push(f(-rad, -rad));
-        vec.push(f( rad,  rad));
-        vec.push(f(-rad,  rad));
-        vec.push(f( rad,  rad));
-        vec.push(f(-rad, -rad));
-        vec.push(f( rad, -rad));
+fn plane(rad: f32) -> MeshSource<VertN, ()> {
+    MeshSource {
+        verts: vec![
+            VertN { pos: [ rad, 0.,  rad], norm: [0., 1., 0.] },
+            VertN { pos: [-rad, 0.,  rad], norm: [0., 1., 0.] },
+            VertN { pos: [-rad, 0., -rad], norm: [0., 1., 0.] },
+            VertN { pos: [ rad, 0.,  rad], norm: [0., 1., 0.] },
+            VertN { pos: [-rad, 0., -rad], norm: [0., 1., 0.] },
+            VertN { pos: [ rad, 0., -rad], norm: [0., 1., 0.] },
+        ],
+        inds: Indexing::All,
+        prim: Primitive::TriangleList,
+        mat: (),
     }
+}
 
-    let mut verts = Vec::with_capacity(6 * 6);
-    square(rad, |y, z| VertN { pos: [-rad, y, z], norm: [-1., 0., 0.] }, &mut verts);
-    square(rad, |z, y| VertN { pos: [ rad, y, z], norm: [ 1., 0., 0.] }, &mut verts);
-    square(rad, |x, z| VertN { pos: [x, -rad, z], norm: [0., -1., 0.] }, &mut verts);
-    square(rad, |z, x| VertN { pos: [x,  rad, z], norm: [0.,  1., 0.] }, &mut verts);
-    square(rad, |x, y| VertN { pos: [x, y, -rad], norm: [0., 0., -1.] }, &mut verts);
-    square(rad, |y, x| VertN { pos: [x, y,  rad], norm: [0., 0.,  1.] }, &mut verts);
-
+fn bevel_cube(rad: f32, bev: f32) -> MeshSource<VertN, ()> {
+    let verts = vec![
+        VertN { pos: [rad, -(rad - bev), -(rad - bev)], norm: [1., 0., 0.] },
+        VertN { pos: [(rad - bev), -rad, -(rad - bev)], norm: [0., -1., 0.] },
+        VertN { pos: [(rad - bev), -(rad - bev), -rad], norm: [0., 0., -1.] },
+        VertN { pos: [rad, -(rad - bev), (rad - bev)], norm: [1., 0., 0.] },
+        VertN { pos: [(rad - bev), -(rad - bev), rad], norm: [0., 0., 1.] },
+        VertN { pos: [(rad - bev), -rad, (rad - bev)], norm: [0., -1., 0.] },
+        VertN { pos: [-(rad - bev), -(rad - bev), rad], norm: [0., 0., 1.] },
+        VertN { pos: [-rad, -(rad - bev), (rad - bev)], norm: [-1., 0., 0.] },
+        VertN { pos: [-(rad - bev), -rad, (rad - bev)], norm: [0., -1., 0.] },
+        VertN { pos: [-(rad - bev), -(rad - bev), -rad], norm: [0., 0., -1.] },
+        VertN { pos: [-(rad - bev), -rad, -(rad - bev)], norm: [0., -1., 0.] },
+        VertN { pos: [-rad, -(rad - bev), -(rad - bev)], norm: [-1., 0., 0.] },
+        VertN { pos: [(rad - bev), (rad - bev), -rad], norm: [0., 0., -1.] },
+        VertN { pos: [(rad - bev), rad, -(rad - bev)], norm: [0., 1., 0.] },
+        VertN { pos: [rad, (rad - bev), -(rad - bev)], norm: [1., 0., 0.] },
+        VertN { pos: [(rad - bev), (rad - bev), rad], norm: [0., 0., 1.] },
+        VertN { pos: [rad, (rad - bev), (rad - bev)], norm: [1., 0., 0.] },
+        VertN { pos: [(rad - bev), rad, (rad - bev)], norm: [0., 1., 0.] },
+        VertN { pos: [-rad, (rad - bev), (rad - bev)], norm: [-1., 0., 0.] },
+        VertN { pos: [-(rad - bev), (rad - bev), rad], norm: [0., 0., 1.] },
+        VertN { pos: [-(rad - bev), rad, (rad - bev)], norm: [0., 1., 0.] },
+        VertN { pos: [-rad, (rad - bev), -(rad - bev)], norm: [-1., 0., 0.] },
+        VertN { pos: [-(rad - bev), rad, -(rad - bev)], norm: [0., 1., 0.] },
+        VertN { pos: [-(rad - bev), (rad - bev), -rad], norm: [0., 0., -1.] },
+    ]; 
+    
+    let inds = vec![3-1, 24-1, 13-1, 6-1, 11-1, 2-1, 19-1, 12-1, 8-1, 23-1,
+        18-1, 14-1, 16-1, 7-1, 5-1, 1-1, 2-1, 3-1, 4-1, 5-1, 6-1, 7-1, 8-1, 9-1,
+        10-1, 11-1, 12-1, 13-1, 14-1, 15-1, 16-1, 17-1, 18-1, 19-1, 20-1, 21-1,
+        22-1, 23-1, 24-1, 4-1, 2-1, 1-1, 11-1, 3-1, 2-1, 13-1, 1-1, 3-1, 7-1, 6-1,
+        5-1, 17-1, 5-1, 4-1, 12-1, 9-1, 8-1, 20-1, 8-1, 7-1, 22-1, 10-1, 12-1, 18-1,
+        15-1, 14-1, 24-1, 14-1, 13-1, 21-1, 16-1, 18-1, 23-1, 19-1, 21-1, 15-1, 4-1,
+        1-1, 3-1, 10-1, 24-1, 6-1, 9-1, 11-1, 19-1, 22-1, 12-1, 23-1, 21-1, 18-1,
+        16-1, 20-1, 7-1, 4-1, 6-1, 2-1, 11-1, 10-1, 3-1, 13-1, 15-1, 1-1, 7-1, 9-1,
+        6-1, 17-1, 16-1, 5-1, 12-1, 11-1, 9-1, 20-1, 19-1, 8-1, 22-1, 24-1, 10-1,
+        18-1, 17-1, 15-1, 24-1, 23-1, 14-1, 21-1, 20-1, 16-1, 23-1, 22-1, 19-1,
+        15-1, 17-1, 4-1]; 
+    
     MeshSource {
         verts: verts,
-        inds: Indexing::All,
+        inds: Indexing::Inds(inds),
         prim: Primitive::TriangleList,
         mat: (),
     }
@@ -173,10 +229,15 @@ impl<R: gfx::Resources> App<R> {
                     prim: Primitive::LineList,
                     mat: (),
                 }.upload(factory),
-            cube: cube(1.)
+            cube: bevel_cube(1., 0.05)
                 .with_tex(Point2::new(0., 0.))
                 .compute_tan()
                 .with_material(mat.dark_plastic.clone())
+                .upload(factory),
+            floor: plane(5.)
+                .with_tex(Point2::new(0., 0.))
+                .compute_tan()
+                .with_material(mat.floor.clone())
                 .upload(factory),
             mats: mat,
             primary: ViveController {
@@ -241,6 +302,7 @@ impl<R: gfx::Resources> App<R> {
             ]);
         });
 
+        // Draw & update cubes
         let mut guru = VrGuru::new(&self.primary, &self.secondary); 
         let cube_partials: Vec<_> = self.model.cubes
             .iter_mut()
@@ -262,6 +324,8 @@ impl<R: gfx::Resources> App<R> {
                 }
             })
             .collect();
+        let stage = na::try_convert(vrm.stage).unwrap_or(na::one());
+        guru.primary.laser(&stage, &Plane::new(Vector3::y()));
         let toi = guru.primary.laser_toi.unwrap_or(FAR_PLANE as f32).max(0.01);
         guru.apply();
         for p in cube_partials {
@@ -275,6 +339,9 @@ impl<R: gfx::Resources> App<R> {
 
         self.solid.draw(ctx, na::convert(
             Similarity3::from_isometry(self.primary.pose(), toi)
-        ), &self.line)
+        ), &self.line);
+
+        // Draw floor
+        self.pbr.draw(ctx, na::convert(stage), &self.floor);
     }
 }

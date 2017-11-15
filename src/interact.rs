@@ -60,7 +60,7 @@ impl Ord for ControllerQuery {
 
 impl PartialOrd for ControllerQuery {
     fn partial_cmp(&self, other: &ControllerQuery) -> Option<Ordering> {
-        self.hit.toi.partial_cmp(&other.hit.toi)
+        other.hit.toi.partial_cmp(&self.hit.toi)
     }
 }
 
@@ -79,11 +79,11 @@ impl ControllerGuru {
         shape: &S,
     ) {
         let ray = Ray::new(self.data.origin(), self.data.pointing());
-        match (shape.toi_with_ray(pos, &ray, true), self.laser_toi) {
-            (Some(t), Some(ref mut o)) if *o > t => *o = t,
-            (Some(t), ref mut l @ None) => *l = Some(t),
-            _ => (),
-        }
+        self.laser_toi = match (shape.toi_with_ray(pos, &ray, true), self.laser_toi) {
+            (Some(t), Some(o)) if t < o => Some(t),
+            (Some(t), None) => Some(t),
+            (_, o) => o,
+        };
     }
 
     pub fn pointing<S: RayCast<Point3<f32>, Isometry3<f32>>>(
@@ -144,7 +144,7 @@ impl<T> Anywhere<T> {
         From::from(Some(v))
     }
 
-    pub fn take(&self) -> Option<T> {
+    pub fn take(&self) -> Option<T> { 
         self.0.lock().unwrap().take()
     }
 
