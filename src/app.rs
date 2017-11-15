@@ -9,7 +9,7 @@ use flight::load;
 use flight::draw::{DrawParams, Painter, SolidStyle, PbrStyle, PbrMaterial};
 use flight::vr::{primary, secondary, VrMoment, ViveController, Trackable};
 
-use interact::{VrGuru, PointingReply};
+use interact::{VrGuru};
 
 pub const NEAR_PLANE: f64 = 0.1;
 pub const FAR_PLANE: f64 = 75.;
@@ -66,63 +66,6 @@ pub struct CubeModel {
     radius: f32,
 }
 
-struct CubePartial {
-    index: usize,
-    reply: PointingReply,
-}
-
-impl CubePartial {
-    fn finish<R: gfx::Resources, C: gfx::CommandBuffer<R>>(
-        self,
-        ctx: &mut DrawParams<R, C>,
-        app: &mut App<R>,
-    ) {
-        let model = &mut app.model.cubes[self.index];
-        if let Some(_) = self.reply.expect("pointing not applied") {
-            // TODO: speed not delta
-            // Yank
-            if app.primary.pad_delta[1] < 0. {
-                model.pos = Isometry3::from_parts(
-                    Translation3::from_vector((app.primary.pose() * Point3::new(0., 0., -0.1 - model.radius)).coords),
-                    model.pos.rotation,
-                );
-            }
-
-            // TODO: speed not delta
-            // Push
-            if app.primary.pad_delta[1] > 0. {
-                model.pos = Isometry3::from_parts(
-                    Translation3::from_vector((app.primary.pose() * Point3::new(0., 0., -2.5)).coords),
-                    model.pos.rotation,
-                );
-            }
-
-            // Grab
-            if app.primary.trigger > 0.5 && app.primary.trigger - app.primary.trigger_delta < 0.5 {
-                model.grabbed = Some(app.primary.pose().inverse() * model.pos);
-            }
-        }
-        // Update position
-        if let Some(off) = model.grabbed {
-            model.pos = app.primary.pose() * off;
-            app.pbr.draw(
-                ctx,
-                na::convert(Similarity3::from_isometry(model.pos, model.radius)),
-                &Mesh {
-                    mat: app.mats.blue_plastic.clone(),
-                    .. app.cube.clone()
-                },
-            );
-        } else {
-            app.pbr.draw(
-                ctx,
-                na::convert(Similarity3::from_isometry(model.pos, model.radius)),
-                &app.cube
-            );
-        }
-    }
-}
-
 pub struct App<R: gfx::Resources> {
     solid: Painter<R, SolidStyle<R>>,
     pbr: Painter<R, PbrStyle<R>>,
@@ -133,7 +76,6 @@ pub struct App<R: gfx::Resources> {
     mats: AppMats<R>,
     primary: ViveController,
     secondary: ViveController,
-    model: Model,
 }
 
 fn plane(rad: f32) -> MeshSource<VertN, ()> {
@@ -201,6 +143,23 @@ fn bevel_cube(rad: f32, bev: f32) -> MeshSource<VertN, ()> {
 }
 
 impl<R: gfx::Resources> App<R> {
+    pub fn model(&self) -> Model {
+        Model {
+            cubes: (0i32..10).map(|i| {
+                let rad = 0.2 * (1. - i as f32 / 15.);
+                let theta = (i as f32) / 5. * PI;
+                CubeModel {
+                    grabbed: None,
+                    pos: Isometry3::from_parts(
+                        Translation3::new(theta.sin() * 1., 0., theta.cos() * 1.),
+                        UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta)
+                    ),
+                    radius: rad,
+                }
+            }).collect(),
+        }
+    }
+
     pub fn new<F: Factory<R> + FactoryExt<R>>(factory: &mut F) -> Result<Self, Error> {
         // Setup Painters
         let mut solid = Painter::new(factory)?;
@@ -247,21 +206,7 @@ impl<R: gfx::Resources> App<R> {
             secondary: ViveController {
                 is: secondary(),
                 .. Default::default()
-            },
-            model: Model {
-                cubes: (0i32..10).map(|i| {
-                    let rad = 0.2 * (1. - i as f32 / 15.);
-                    let theta = (i as f32) / 5. * PI;
-                    CubeModel {
-                        grabbed: None,
-                        pos: Isometry3::from_parts(
-                            Translation3::new(theta.sin() * 1., 0., theta.cos() * 1.),
-                            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), theta)
-                        ),
-                        radius: rad,
-                    }
-                }).collect(),
-            },
+            }
         })
     }
 
@@ -269,6 +214,7 @@ impl<R: gfx::Resources> App<R> {
         &mut self,
         ctx: &mut DrawParams<R, C>,
         vrm: &VrMoment,
+        model: &mut Model,
     ) {
         match (self.primary.update(vrm), self.secondary.update(vrm)) {
             (Ok(_), Ok(_)) => (),
@@ -304,23 +250,66 @@ impl<R: gfx::Resources> App<R> {
 
         // Draw & update cubes
         let mut guru = VrGuru::new(&self.primary, &self.secondary); 
-        let cube_partials: Vec<_> = self.model.cubes
+        let cube_partials: Vec<_> = model.cubes
             .iter_mut()
-            .enumerate()
-            .map(|(i, c)| {
-                if c.grabbed.is_some() && guru.primary.data.trigger > 0.5 {
+            .map(|model| {
+                if model.grabbed.is_some() && guru.primary.data.trigger > 0.5 {
                     guru.primary.block_pointing();
                 } else {
-                    c.grabbed = None;
+                    model.grabbed = None;
                 }
-                let cuboid = Cuboid3::new(Vector3::from_element(c.radius));
-                guru.primary.laser(&c.pos, &cuboid);
-                CubePartial {
-                    index: i,
-                    reply: guru.primary.pointing(
-                        &c.pos,
-                        &cuboid,
-                        true),
+                let cuboid = Cuboid3::new(Vector3::from_element(model.radius));
+                guru.primary.laser(&model.pos, &cuboid);
+                let reply = guru.primary.pointing(
+                    &model.pos,
+                    &cuboid,
+                    true);
+                move |ctx: &mut DrawParams<R, C>, app: &mut App<R>| {
+                    if let Some(_) = reply.expect("pointing not applied") {
+                        // TODO: speed not delta
+                        // Yank
+                        if app.primary.pad_delta[1] < 0. && app.primary.pad[1] < 0. {
+                            model.pos = Isometry3::from_parts(
+                                Translation3::from_vector((app.primary.pose() *
+                                Point3::new(0., 0., -0.1 -
+                                model.radius)).coords), model.pos.rotation,
+                            );
+                        }
+
+                        // TODO: speed not delta
+                        // Push
+                        if app.primary.pad_delta[1] > 0. && app.primary.pad[1] > 0. {
+                            model.pos = Isometry3::from_parts(
+                                Translation3::from_vector((app.primary.pose() *
+                                Point3::new(0., 0., -2.5)).coords),
+                                model.pos.rotation,
+                            );
+                        }
+
+                        // Grab
+                        if app.primary.trigger > 0.5 
+                        && app.primary.trigger - app.primary.trigger_delta < 0.5 {
+                            model.grabbed = Some(app.primary.pose().inverse() * model.pos);
+                        }
+                    }
+                    // Update position
+                    if let Some(off) = model.grabbed {
+                        model.pos = app.primary.pose() * off;
+                        app.pbr.draw(
+                            ctx,
+                            na::convert(Similarity3::from_isometry(model.pos, model.radius)),
+                            &Mesh {
+                                mat: app.mats.blue_plastic.clone(),
+                                .. app.cube.clone()
+                            },
+                        );
+                    } else {
+                        app.pbr.draw(
+                            ctx,
+                            na::convert(Similarity3::from_isometry(model.pos, model.radius)),
+                            &app.cube
+                        );
+                    }
                 }
             })
             .collect();
@@ -328,8 +317,8 @@ impl<R: gfx::Resources> App<R> {
         guru.primary.laser(&stage, &Plane::new(Vector3::y()));
         let toi = guru.primary.laser_toi.unwrap_or(FAR_PLANE as f32).max(0.01);
         guru.apply();
-        for p in cube_partials {
-            p.finish(ctx, self);
+        for mut p in cube_partials {
+            p(ctx, self);
         }
 
         // Draw controllers

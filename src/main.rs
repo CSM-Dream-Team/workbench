@@ -1,3 +1,5 @@
+#![feature(fn_traits)]
+
 // Crates
 #[macro_use]
 extern crate log;
@@ -99,6 +101,7 @@ fn main() {
             return
         },
     };
+    let mut model = application.model();
 
     // setup context
     let mut ctx = draw::DrawParams {
@@ -127,7 +130,7 @@ fn main() {
         ctx.right = hmd.right;
 
         // Draw frame
-        application.draw(&mut ctx, &vrm);
+        application.draw(&mut ctx, &vrm, &mut model);
 
         // Send instructions to OpenGL
         // TODO: Move flush to separate thread
